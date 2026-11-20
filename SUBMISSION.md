@@ -1,4 +1,4 @@
 # Lab 3: Wall Following
 
 ## YouTube video link
-[FILL ME IN](https://tinyurl.com/22mts2ax)
+[Lab 3 wall following - full counter-clockwise lap of Levine](https://youtu.be/68xQbCQoboE)

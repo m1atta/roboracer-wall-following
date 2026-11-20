@@ -1,101 +1,92 @@
-# Lab 3: Wall Following
+# RoboRacer Wall Following
 
-## I. Learning Goals
+A ROS 2 Humble C++ node that uses simulated LiDAR data and a PID controller to keep a RoboRacer vehicle a fixed distance from the wall and drive it autonomously around the Levine Hall loop.
 
-- PID Controllers
-- Driving the car autonomously via Wall Following
+![Wall-following lap around Levine (4x speed)](media/wall_following_demo.gif)
 
-## II. Review of PID in the time domain
+## What the node does
 
-A PID controller is a way to maintain certain parameters of a system around a specified set point. PID controllers are used in a variety of applications requiring closed-loop control, such as in the VESC speed controller on your car.
+1. Subscribes to `/scan` to receive LiDAR range measurements.
+2. Reads two beams on the left side of the car: one straight out at 90° (`b`) and one 50° further forward (`a`).
+3. Calculates the car's angle to the wall, `α = atan((a·cos θ − b) / (a·sin θ))`, and its current distance, `D = b·cos α`.
+4. Projects the distance 1 m ahead, `D_future = D + L·sin α`, so the car corrects before it reaches a turn.
+5. Runs the error (`D_future − desired distance`) through a PID controller to get a steering angle.
+6. Picks a speed from the steering angle: 1.5 m/s on straights, 1.0 m/s between 10° and 20°, and 0.5 m/s in sharp turns.
+7. Publishes the steering angle and speed as an Ackermann command to `/drive`.
 
-The general equation for a PID controller in the time domain, as discussed in lecture, is as follows:
+### Doorway handling
 
-$$ u(t)=K_{p}e(t)+K_{i}\int_{0}^{t}e(t^{\prime})dt^{\prime}+K_{d}\frac{d}{dt}(e(t)) $$
+To two side beams, an open doorway looks like a corner, because the wall suddenly disappears. The node checks the beam straight ahead to tell them apart: at a corner there is a wall in front of the car; at a doorway it is open. When the path ahead is open, the node limits how far a sudden gap can pull the car sideways, so it drives past the door recesses instead of turning into them.
 
-Here, $K_p$, $K_i$, and $K_d$ are constants that determine how much weight each of the three components (proportional, integral, derivative) contribute to the control output $u(t)$. $u(t)$ in our case is the steering angle we want the car to drive at. The error term $e(t)$ is the difference between the set point and the parameter we want to maintain around that set point.
+## Tuned values
 
-## III. Wall Following
+| Parameter | Value | Purpose |
+|---|---|---|
+| `kp` | 1.0 | Steering per metre of error |
+| `kd` | 0.1 | Damps side-to-side wobble |
+| `ki` | 0.0 | Not needed in simulation |
+| Desired distance | 1.0 m | Distance kept from the left wall |
+| Look-ahead `L` | 1.0 m | How far ahead the distance is projected |
+| Beam angle `θ` | 50° | Angle between beams `a` and `b` |
 
-In the context of our car, the desired distance to the wall should be our set point for our controller, which means our error is the difference between the desired and actual distance to the wall. This raises an important question: how do we measure the distance to the wall, and at what point in time? One option would simply be to consider the distance to the right wall at the current time $t$ (let's call it $D_t$). Let's consider a generic orientation of the car with respect to the right wall and suppose the angle between the car's x-axis and the axis in the direction along the wall is denoted by $\alpha$. We will obtain two laser scans (distances) to the wall:
-one 90 degrees to the right of the car's x-axis (beam b in the figure), and one (beam a) at an angle $\theta$ ( $0<\theta\leq70$ degrees) to the first beam. Suppose these two laser scans return distances a and b, respectively.
+All values are hardcoded in `wall_follow/src/wall_follow_node.cpp`, so the node runs with a plain `ros2 run` and no parameter file.
 
-![fig1](img/wall_following_lab_figure_1.png)
+## System
 
-*Figure 1: Distance and orientation of the car relative to the wall*
+- Ubuntu 22.04 on WSL 2
+- ROS 2 Humble
+- C++
+- F1TENTH Gym ROS simulator
+- RViz
+- `colcon`
 
-Using the two distances $a$ and $b$ from the laser scan, the angle $\theta$ between the laser scans, and some trigonometry, we can express $\alpha$ as
+## Map
 
-$$ \alpha=\mbox{tan}^{-1}\left(\frac{a\mbox{cos}(\theta)-b}{a\mbox{sin}(\theta)}\right) $$
+The simulator's standard `levine` map has open exits leading out of the loop. `maps/levine_blocked.png` is a copy with those exits closed off so the car stays on the loop. The door recesses in the west hallway are kept, because they are the part that tests the doorway handling. To use it, copy both `maps/levine_blocked.*` files into `f1tenth_gym_ros/maps/` and set `map_path` in `f1tenth_gym_ros/config/sim.yaml` to point at `levine_blocked`.
 
-We can then express $D_t$ as 
+## Build
 
-$$ D_t=b\mbox{cos}(\alpha) $$
-
-to get the current distance between the car and the right wall. What's our error term $e(t)$, then? It's simply the difference between the desired distance and actual distance! For example, if our desired distance is 1 meter from the wall, then $e(t)$ becomes $1-D_t$.
-	
-However, we have a problem on our hands. Remember that this is a race: your car will be traveling at a high speed and therefore will have a non-instantaneous response to whatever speed and servo control you give to it. If we simply use the current distance to the wall, we might end up turning too late, and the car may crash. Therefore, we must look to the future and project the car ahead by a certain lookahead distance (let's call it $L$). Our new distance $D_{t+1}$ will then be
-
-$$D_{t+1}=D_t+L\mbox{sin}(\alpha)$$
-
-![fig1](img/wall_following_lab_figure_2.png)
-
-*Figure 2: Finding the future distance from the car to the wall*
-
-We're almost there. Our control algorithm gives us a steering angle for the VESC, but we would also like to slow the car down around corners for safety. We can compute the speed in a step-like fashion based on the steering angle, or equivalently the calculated error, so that as the angle exceeds progressively larger amounts, the speed is cut in discrete increments. For this lab, a good starting point for the speed control algorithm is:
-
-- If the steering angle is between 0 degrees and 10 degrees, the car should drive at 1.5 meters per second (or more).
-- If the steering angle is between 10 degrees and 20 degrees, the speed should be 1.0 meters per second.
-- Otherwise, the speed should be 0.5 meters per second.
-
-So, in summary, here's what we need to do:
-
-1. Obtain two laser scans (distances) a and b.
-2. Use the distances a and b to calculate the angle $\alpha$ between the car's $x$-axis and the right wall.
-3. Use $\alpha$ to find the current distance $D_t$ to the car, and then $\alpha$ and $D_t$ to find the estimated future distance $D_{t+1}$ to the wall.
-4. Run $D_{t+1}$ through the PID algorithm described above to get a steering angle.
-5. Use the steering angle you computed in the previous step to compute a safe driving speed.
-6. Publish the steering angle and driving speed to the `/drive` topic in simulation.
-
-## IV. Implementation
-
-Implement wall following to make the car drive autonomously around the Levine Hall map. Follow the inner walls of Levine. Which means follow left if the car is going counter-clockwise in the loop. (The first race we run will be counter-clockwise). You can implement this node in either C++ or Python.
-
-Test in the [f1tenth_gym_ros](https://github.com/f1tenth/f1tenth_gym_ros/tree/dev-jazzy) simulator on the `levine_blocked` map by changing the `map_path` in `sim.yaml` to `'maps/levine_blocked'`. This map is the Levine loop with its doorways sealed, so the car cannot wander out. The autograder drives your node around that same map. Halfway down the west hallway a pair of facing door recesses opens up; to two beams a doorway looks like a corner, so a naive follower steers into it. Think about how your node can tell the two apart (a corner has a wall ahead, a doorway does not). The map comes with a centerline, so the simulator counts your laps (`/ego_racecar/lap_count`, and a "completed lap" line in the bridge log).
-
-Your node must subscribe to `/scan` and publish `AckermannDriveStamped` on `/drive`, and it must work when started with a plain `ros2 run wall_follow <executable>`: the autograder passes no parameter file, so bake your tuned gains, desired distance and speeds into the node's defaults.
-
-## V. Deliverables and Submission
-
-**Deliverable 1**: After you're finished, update the entire skeleton package directory with your `wall_follow` package and directly commit and push to the repo Classroom 50 created for you. Your committed code should start and run in simulation smoothly, this includes building as a package with any dependencies included as part of the ``package.xml``.
-
-**Deliverable 2**: Make a screen cast of running your wall following node in the simulation: at least one full counter-clockwise lap of Levine, following the inner wall. Upload your video to YouTube (unlisted) or Google Drive — for Drive, set sharing to **"Anyone with the link can view"** or we cannot grade it — and include the link in **`SUBMISSION.md`**.
-
-### Submitting
-
-We'll be using Classroom 50 throughout the semester to manage submissions for lab assignments. You can commit and push your work as often as you need, but a plain push does **not** count as a submission. When you're ready to submit, push a tag named `submission`:
+Place this repository inside the `src` directory of a ROS 2 workspace, then run:
 
 ```bash
-git push                            # your commits
-git tag submission
-git push origin submission          # this triggers the autograder
+source /opt/ros/humble/setup.bash
+cd ~/sim_ws
+colcon build --packages-select wall_follow
+source install/local_setup.bash
 ```
 
-The autograder builds your package, probes your controller, and drives it around Levine in the simulator, then posts your score as a **Release** on your repo (check the Releases page or the commit's status check a few minutes after you tag). To resubmit, move the tag to a new commit:
+## Run
+
+Launch the F1TENTH simulator in one terminal:
 
 ```bash
-git tag -f submission
-git push --force origin submission
+source /opt/ros/humble/setup.bash
+source ~/sim_ws/install/local_setup.bash
+ros2 launch f1tenth_gym_ros gym_bridge_launch.py
 ```
-The best scored ``submission`` push is counted as your final submission and its grade will be your lab's grade.
 
-**The autograder finds your work by name.** Use the names the deliverables specify: package `wall_follow` with an executable it can start with `ros2 run wall_follow <executable>` (the skeleton's `wall_follow_node`), subscribing `/scan` and publishing `/drive`. Otherwise, the autograder will not be able to grade your work and your submission may get the wrong grade.
+Run the wall-following node in a second terminal:
 
-**Only the topics the lab needs.** Wall following drives on the LiDAR alone: your nodes may read `/scan` and publish on `/drive`, plus topics only your own nodes use (markers, a filtered scan). The autograder watches the ROS graph while your code runs: a node that reads anything else the simulator publishes (the car's odometry, `/tf`, the lap counter) or publishes on a topic the simulator or the autograder listens to (`/initialpose`, which teleports the car, `/ego_racecar/odom`, the lap counter, ...) gets every line that ran your code scored 0.
+```bash
+source /opt/ros/humble/setup.bash
+source ~/sim_ws/install/local_setup.bash
+ros2 run wall_follow wall_follow_node
+```
 
-## VI: Grading Rubric
+The car starts driving immediately, counter-clockwise around the loop, following the inner (left) wall.
 
-- Compilation: **10** Points (autograded)
-- Implemented PID: **40** Points (autograded without the simulator: your node is fed scans of a straight corridor with the car too close to one wall, too close to the other, and turned toward each wall, and must steer the right way in each case — whichever wall you follow)
-- Tuned PID: **40** Points (autograded in simulation: one counter-clockwise lap of the grading map, starting on the south hallway heading east, without touching a wall; a run that ends early earns partial credit for the fraction of the loop covered)
-- Video: **10** Points (TA-graded from the link in `SUBMISSION.md`: YouTube unlisted, or Google Drive shared as "Anyone with the link can view")
+## Result
+
+The car completes full counter-clockwise laps of Levine without touching a wall, slowing down for corners and driving past the door recesses in the west hallway.
+
+![RViz during the lap](media/wall_following_demo.png)
+
+Full demonstration video: [YouTube](https://youtu.be/68xQbCQoboE)
+
+## Key learning
+
+This project introduced me to PID control, including how each of the P, I and D terms changes the car's behaviour; using trigonometry on LiDAR beams to estimate distance and heading relative to a wall; predicting the car's future position to make up for its response delay; and handling an edge case (doorways vs. corners) using extra sensor information.
+
+## Credits
+
+Starter package from [f1tenth/f1tenth_lab3_template](https://github.com/f1tenth/f1tenth_lab3_template) (MIT license). The lab was completed as part of the TMU Velocity Design Team's RoboRacer training.
